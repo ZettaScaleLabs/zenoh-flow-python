@@ -41,15 +41,14 @@ struct PySource(Library);
 #[async_trait]
 impl Source for PySource {
     async fn run(&self, ctx: &mut zenoh_flow::Context, state: &mut State) -> ZFResult<Data> {
-        // Preparing python
-        let gil = Python::acquire_gil();
-        let py = gil.python();
-
         // Preparing parameter
         let current_state = state.try_get::<PythonState>()?;
         let source_class = current_state.module.as_ref().clone();
         let py_ctx = PyContext::from(ctx);
 
+        // Getting Python GIL
+        let gil = Python::acquire_gil();
+        let py = gil.python();
         // Calling python
         let value: Vec<u8> = source_class
             .call_method1(
@@ -65,6 +64,8 @@ impl Source for PySource {
             .extract(py)
             .map_err(|e| from_pyerr_to_zferr(e, &py))?;
 
+        drop(py);
+        drop(gil);
         // Converting to rust types
         Ok(Data::from_bytes(value))
     }
@@ -74,8 +75,6 @@ impl Node for PySource {
     fn initialize(&self, configuration: &Option<Configuration>) -> ZFResult<State> {
         // Preparing python
         pyo3::prepare_freethreaded_python();
-        let gil = Python::acquire_gil();
-        let py = gil.python();
 
         // Configuring wrapper + python source
         match configuration {
@@ -92,11 +91,16 @@ impl Node for PySource {
                 let py_config = config["configuration"].take();
 
                 // Convert configuration to Python
-                let py_config = configuration_into_py(py, py_config)
-                    .map_err(|e| from_pyerr_to_zferr(e, &py))?;
 
                 // Load Python code
                 let code = read_file(script_file_path)?;
+
+                let gil = Python::acquire_gil();
+                let py = gil.python();
+
+                let py_config = configuration_into_py(py, py_config)
+                    .map_err(|e| from_pyerr_to_zferr(e, &py))?;
+
                 let module =
                     PyModule::from_code(py, &code, &script_file_path.to_string_lossy(), "source")
                         .map_err(|e| from_pyerr_to_zferr(e, &py))?;
@@ -112,6 +116,9 @@ impl Node for PySource {
                     .map_err(|e| from_pyerr_to_zferr(e, &py))?
                     .into();
 
+                drop(py);
+                drop(gil);
+
                 Ok(State::from(PythonState {
                     module: Arc::new(source_class),
                     py_state: Arc::new(state),
@@ -122,11 +129,11 @@ impl Node for PySource {
     }
 
     fn finalize(&self, state: &mut State) -> ZFResult<()> {
-        let gil = Python::acquire_gil();
-        let py = gil.python();
         let current_state = state.try_get::<PythonState>()?;
         let src_class = current_state.module.as_ref().clone();
 
+        let gil = Python::acquire_gil();
+        let py = gil.python();
         src_class
             .call_method1(
                 py,
@@ -134,6 +141,8 @@ impl Node for PySource {
                 (src_class.clone(), current_state.py_state.as_ref().clone()),
             )
             .map_err(|e| from_pyerr_to_zferr(e, &py))?;
+        drop(py);
+        drop(gil);
 
         Ok(())
     }

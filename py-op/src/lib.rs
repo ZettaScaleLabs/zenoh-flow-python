@@ -71,16 +71,22 @@ impl Operator for PyOperator {
         // Getting tokens for conversion to Python
         let real_tokens = std::mem::replace(tokens, HashMap::new());
 
-        // Preparing python environment
-        let gil = Python::acquire_gil();
-        let py = gil.python();
-
         // Preparing parameters
         let current_state = state.try_get::<PythonState>()?;
         let op_class = current_state.module.as_ref().clone();
         let py_ctx = PyContext::from(ctx);
+
+        // Preparing python environment
+        let gil = Python::acquire_gil();
+        let py = gil.python();
+
         let py_tokens = tokens_into_py(py, real_tokens);
 
+        drop(py);
+        drop(gil);
+
+        let gil = Python::acquire_gil();
+        let py = gil.python();
         // Calling python code
         let ir_result: bool = op_class
             .call_method1(
@@ -97,10 +103,17 @@ impl Operator for PyOperator {
             .extract(py)
             .map_err(|e| from_pyerr_to_zferr(e, &py))?;
 
+        drop(py);
+        drop(gil);
+
+        let gil = Python::acquire_gil();
+        let py = gil.python();
         // Getting back the tokens
         let py_tokens: HashMap<String, PyToken> = py_tokens
             .extract(py)
             .map_err(|e| from_pyerr_to_zferr(e, &py))?;
+        drop(py);
+        drop(gil);
 
         // Converting the tokens to the rust type
         let new_tokens = {
@@ -124,15 +137,15 @@ impl Operator for PyOperator {
         state: &mut State,
         inputs: &mut HashMap<PortId, DataMessage>,
     ) -> ZFResult<HashMap<PortId, Data>> {
-        // Prepare Python
-        let gil = Python::acquire_gil();
-        let py = gil.python();
-
         // Preparing parameters
         let current_state = state.try_get::<PythonState>()?;
         let op_class = current_state.module.as_ref().clone();
         let py_ctx = PyContext::from(ctx);
         let py_data = PyInputs::try_from(inputs)?;
+
+        // Prepare Python
+        let gil = Python::acquire_gil();
+        let py = gil.python();
 
         // Call python copde
         let py_values = op_class
@@ -151,6 +164,9 @@ impl Operator for PyOperator {
         // Converting the results
         let values = outputs_from_py(py, py_values.into())?;
 
+        drop(py);
+        drop(gil);
+
         Ok(values.try_into()?)
     }
 
@@ -161,16 +177,16 @@ impl Operator for PyOperator {
         outputs: HashMap<PortId, Data>,
         deadlinemiss: Option<LocalDeadlineMiss>,
     ) -> ZFResult<HashMap<PortId, NodeOutput>> {
-        // Preparing python
-        let gil = Python::acquire_gil();
-        let py = gil.python();
-
         // Preparing parameters
         let current_state = state.try_get::<PythonState>()?;
         let op_class = current_state.module.as_ref().clone();
         let py_ctx = PyContext::from(ctx);
         let py_data = PyOutputs::try_from(outputs)?;
         let deadline_miss = PyLocalDeadlineMiss::from(deadlinemiss);
+
+        // Preparing python
+        let gil = Python::acquire_gil();
+        let py = gil.python();
 
         // Calling pthon code
         let py_values = op_class
@@ -189,6 +205,8 @@ impl Operator for PyOperator {
 
         // Converting the results
         let py_values = outputs_from_py(py, py_values.into())?;
+        drop(py);
+        drop(gil);
 
         // Generating the rust output
         let rust_values: HashMap<PortId, Data> = py_values.try_into()?;
@@ -206,8 +224,6 @@ impl Node for PyOperator {
     fn initialize(&self, configuration: &Option<Configuration>) -> ZFResult<State> {
         // Preparing python
         pyo3::prepare_freethreaded_python();
-        let gil = Python::acquire_gil();
-        let py = gil.python();
 
         // Configuring wrapper + python operator
         match configuration {
@@ -222,12 +238,14 @@ impl Node for PyOperator {
                 config["python-script"].take();
                 let py_config = config["configuration"].take();
 
+                // Load Python code
+                let code = read_file(script_file_path)?;
+
+                let gil = Python::acquire_gil();
+                let py = gil.python();
                 // Convert configuration to Python
                 let py_config = configuration_into_py(py, py_config)
                     .map_err(|e| from_pyerr_to_zferr(e, &py))?;
-
-                // Load Python code
-                let code = read_file(script_file_path)?;
                 let module =
                     PyModule::from_code(py, &code, &script_file_path.to_string_lossy(), "op")
                         .map_err(|e| from_pyerr_to_zferr(e, &py))?;
@@ -245,6 +263,9 @@ impl Node for PyOperator {
                     .call_method1(py, "initialize", (op_class.clone(), py_config))
                     .map_err(|e| from_pyerr_to_zferr(e, &py))?
                     .into();
+
+                drop(py);
+                drop(gil);
 
                 Ok(State::from(PythonState {
                     module: Arc::new(op_class),

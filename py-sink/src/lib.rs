@@ -49,8 +49,6 @@ impl Sink for PySink {
         input: DataMessage,
     ) -> ZFResult<()> {
         // Preparing python
-        let gil = Python::acquire_gil();
-        let py = gil.python();
 
         // Preparing parameters
         let current_state = state.try_get::<PythonState>()?;
@@ -58,6 +56,8 @@ impl Sink for PySink {
         let py_ctx = PyContext::from(ctx);
         let py_data = PyDataMessage::try_from(input)?;
 
+        let gil = Python::acquire_gil();
+        let py = gil.python();
         // Calling python
         sink_class
             .call_method1(
@@ -72,6 +72,9 @@ impl Sink for PySink {
             )
             .map_err(|e| from_pyerr_to_zferr(e, &py))?;
 
+        drop(py);
+        drop(gil);
+
         Ok(())
     }
 }
@@ -80,8 +83,6 @@ impl Node for PySink {
     fn initialize(&self, configuration: &Option<Configuration>) -> ZFResult<State> {
         // Preparing python
         pyo3::prepare_freethreaded_python();
-        let gil = Python::acquire_gil();
-        let py = gil.python();
 
         // Configuring wrapper + python sink
         match configuration {
@@ -97,12 +98,16 @@ impl Node for PySink {
                 config["python-script"].take();
                 let py_config = config["configuration"].take();
 
+                // Load Python code
+                let code = read_file(script_file_path)?;
+
+                let gil = Python::acquire_gil();
+                let py = gil.python();
+
                 // Convert configuration to Python
                 let py_config = configuration_into_py(py, py_config)
                     .map_err(|e| from_pyerr_to_zferr(e, &py))?;
 
-                // Load Python code
-                let code = read_file(script_file_path)?;
                 let module =
                     PyModule::from_code(py, &code, &script_file_path.to_string_lossy(), "sink")
                         .map_err(|e| from_pyerr_to_zferr(e, &py))?;
@@ -117,6 +122,8 @@ impl Node for PySink {
                     .call_method1(py, "initialize", (sink_class.clone(), py_config))
                     .map_err(|e| from_pyerr_to_zferr(e, &py))?
                     .into();
+                drop(py);
+                drop(gil);
 
                 Ok(State::from(PythonState {
                     module: Arc::new(sink_class),
@@ -128,11 +135,11 @@ impl Node for PySink {
     }
 
     fn finalize(&self, state: &mut State) -> ZFResult<()> {
-        let gil = Python::acquire_gil();
-        let py = gil.python();
         let current_state = state.try_get::<PythonState>()?;
         let sink_class = current_state.module.as_ref().clone();
 
+        let gil = Python::acquire_gil();
+        let py = gil.python();
         sink_class
             .call_method1(
                 py,
@@ -140,6 +147,8 @@ impl Node for PySink {
                 (sink_class.clone(), current_state.py_state.as_ref().clone()),
             )
             .map_err(|e| from_pyerr_to_zferr(e, &py))?;
+        drop(py);
+        drop(gil);
 
         Ok(())
     }
